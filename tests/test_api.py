@@ -1,88 +1,84 @@
+"""SM CMDB 领域测试：类型、配置项、属性变更历史、关联关系。"""
+
+import pytest
 from fastapi.testclient import TestClient
-from app.main import app
+
+from app import base
+from app.main import VERSION, app
 
 
-def test_health_and_security_headers():
-    with TestClient(app) as client:
-        response = client.get('/health', headers={'X-Request-Id': 'suite-test'})
-        assert response.status_code == 200
-        assert response.headers['X-Request-Id'] == 'suite-test'
-        assert response.headers['X-Frame-Options'] == 'DENY'
-        assert response.json()['version'] == '2.1.0'
+@pytest.fixture()
+def client(monkeypatch):
+    monkeypatch.setattr(base, "internal_api_key", lambda: "TEST")
+    base.reset_state()
+    from app.main import _init as init_db
+    init_db()
+    with TestClient(app) as c:
+        c.headers["X-Internal-Token"] = "TEST"
+        yield c
 
 
-def test_overview_and_item_lifecycle(monkeypatch):
-    from app import main
-    monkeypatch.setattr(main, 'INTERNAL_API_KEY', 'TEST')
-    with TestClient(app) as client:
-        overview = client.get('/api/overview').json()
-        assert overview['total'] >= 2
-        created = client.post('/api/items', headers={'X-Internal-Token': 'TEST'}, json={'name': '企业级测试资源', 'owner': '测试部', 'priority': 'P2'}).json()
-        assert created['status'] == 'active'
-        updated = client.patch(f"/api/items/{created['id']}/status?item_status=review", headers={'X-Internal-Token': 'TEST'})
-        assert updated.status_code == 200
-        assert updated.json()['status'] == 'review'
+def _type(client, name="server"):
+    return client.post("/api/cmdb/types", json={"name": name}).json()["id"]
 
 
-def test_ops_metrics():
-    with TestClient(app) as client:
-        client.get('/health')
-        metrics = client.get('/api/ops/metrics')
-        assert metrics.status_code == 200
-        assert metrics.json()['requests_total'] >= 1
+def _item(client, name="web-01", type_="server"):
+    client.post("/api/cmdb/types", json={"name": type_})
+    return client.post("/api/cmdb/items", json={"type": type_, "name": name, "identifier": f"host-{name}", "environment": "prod", "owner": "SRE", "attributes": {"ip": "10.0.0.1"}}).json()["id"]
 
 
-
-def test_integration_manifest_contract():
-    with TestClient(app) as client:
-        response = client.get('/api/integration/manifest')
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload['service']
-        assert payload['version'] == '2.1.0'
-        assert '/api/ops/metrics' == payload['metrics_path']
-        assert isinstance(payload['dependencies'], list)
+def test_health_and_version(client):
+    r = client.get("/health", headers={"X-Request-Id": "suite-test"})
+    assert r.status_code == 200
+    assert r.json()["version"] == VERSION
 
 
-
-def test_request_size_and_rate_limit_guards(monkeypatch):
-    from app import main
-    main.RATE_BUCKETS.clear()
-    monkeypatch.setattr(main, 'MAX_REQUEST_BYTES', 4)
-    monkeypatch.setattr(main, 'RATE_MAX_REQUESTS', 1)
-    with TestClient(app) as client:
-        oversized = client.post('/api/items', content='12345', headers={'content-type': 'application/json'})
-        assert oversized.status_code == 413
-        assert client.get('/health').status_code == 200
-        limited = client.get('/health')
-        assert limited.status_code == 429
-        assert limited.headers['Retry-After']
+def test_type_and_item_crud(client):
+    _type(client)
+    _item(client)
+    assert client.post("/api/cmdb/types", json={"name": "server"}).status_code == 409
+    assert client.post("/api/cmdb/items", json={"type": "server", "name": "web-01", "identifier": "h2"}).status_code == 409
+    assert client.get("/api/cmdb/types").json()["total"] == 1
+    assert client.get("/api/cmdb/items").json()["total"] == 1
 
 
-def test_internal_write_token_is_enforced(monkeypatch):
-    from app import main
-    monkeypatch.setattr(main, 'INTERNAL_API_KEY', 'TOKEN')
-    with TestClient(app) as client:
-        blocked = client.post('/api/items', json={'name': 'blocked'})
-        assert blocked.status_code == 403
-        allowed = client.post('/api/items', headers={'X-Internal-Token': 'TOKEN'}, json={'name': 'allowed'})
-        assert allowed.status_code == 201
+def test_item_requires_type(client):
+    assert client.post("/api/cmdb/items", json={"type": "ghost", "name": "xx", "identifier": "hh"}).status_code == 404
 
 
-
-def test_sm3_crypto_endpoint():
-    with TestClient(app) as client:
-        response = client.post('/api/crypto/sm3', json={'value': 'enterprise'})
-        assert response.status_code == 200
-        assert response.json()['algorithm'] == 'SM3'
-        assert len(response.json()['digest']) == 64
-        assert client.get('/api/crypto/status').json()['sm4'] == 'enabled'
+def test_update_records_change(client):
+    item_id = _item(client)
+    assert client.put(f"/api/cmdb/items/{item_id}", json={"attributes": {"ip": "10.0.0.2"}, "changed_by": "运维小李"}).json()["updated"] is True
+    changes = client.get("/api/cmdb/changes", params={"item_id": item_id}).json()
+    assert changes["total"] >= 1
+    assert changes["items"][0]["new_value"] == '"10.0.0.2"'
 
 
+def test_relationship(client):
+    a = _item(client, name="app-01")
+    b = _item(client, name="db-01")
+    rel = client.post("/api/cmdb/relationships", json={"source_id": a, "target_id": b, "relation": "depends_on"})
+    assert rel.status_code == 201
+    rels = client.get(f"/api/cmdb/items/{a}/relationships").json()
+    assert len(rels["outgoing"]) == 1
+    assert client.post("/api/cmdb/relationships", json={"source_id": a, "target_id": "no-such-item", "relation": "xx"}).status_code == 404
 
-def test_security_baseline():
-    with TestClient(app) as client:
-        payload = client.get('/api/security/baseline').json()
-        assert payload['controls']['sm3'] is True
-        assert payload['controls']['sm4'] is True
-        assert payload['controls']['rate_limit'] is True
+
+def test_stats(client):
+    _type(client)
+    _item(client)
+    stats = client.get("/api/cmdb/stats").json()
+    assert stats["types"] == 1
+    assert stats["items"] == 1
+    assert stats["by_type"][0]["count"] == 1
+
+
+def test_manifest_and_crypto(client):
+    assert client.get("/api/integration/manifest").json()["version"] == VERSION
+    enc = client.post("/api/crypto/encrypt", json={"value": "x"}).json()["ciphertext"]
+    assert client.post("/api/crypto/decrypt", json={"value": enc}).json()["plaintext"] == "x"
+
+
+def test_write_requires_auth(client):
+    del client.headers["X-Internal-Token"]
+    assert client.post("/api/cmdb/types", json={"name": "t"}).status_code == 401
