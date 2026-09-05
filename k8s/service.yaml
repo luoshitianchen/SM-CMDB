@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sm-cmdb
+  namespace: sm
+  labels:
+    app: sm-cmdb
+    platform: sm-suite
+spec:
+  type: ClusterIP
+  selector:
+    app: sm-cmdb
+  ports:
+  - name: http
+    port: 8380
+    targetPort: http
+    protocol: TCP
