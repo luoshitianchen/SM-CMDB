@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from app import base
 
 SERVICE = "sm-cmdb"
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 NAME = "SM CMDB"
 DESCRIPTION = "配置管理数据库：配置项、类型、关联关系与变更历史"
 PORT = 8380
