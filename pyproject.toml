@@ -1,16 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "SM-CMDB"
-version = "2.0.0"
-description = "资产配置管理系统：资产类型、资产实例、关系与依赖拓扑"
+name = "sm-service"
+version = "1.0.0"
 requires-python = ">=3.11"
 
 [tool.ruff]
-line-length = 200
+line-length = 120
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM"]
-ignore = ["E501"]
+select = ["E", "F", "I", "W", "UP", "B", "SIM"]
+ignore = ["E501", "B008"]
 
 [tool.pytest.ini_options]
+asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-v --tb=short"
